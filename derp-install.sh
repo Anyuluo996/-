@@ -41,6 +41,8 @@ echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "正在设置 GOPROXY..."
     export GOPROXY=https://xget.anyul.cn/golang,direct
+    export GOSUMDB=off
+    go env GOPROXY
     echo "GOPROXY 已设置为: $GOPROXY"
 else
     echo "跳过代理设置。"

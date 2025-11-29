@@ -1,14 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Derper 自动安装与配置脚本
-# ------------------------------------------------------------------------------
-# 功能：
-# 1. 检查 Go 环境，不存在则提示安装并退出。
-# 2. 询问是否设置 Go 代理。
-# 3. 编译安装 derper。
-# 4. 交互式获取端口、域名、证书路径等配置。
-# 5. 生成 systemd 配置文件。
+# Derper 自动安装与配置脚本 (修复代理校验问题版)
 # ==============================================================================
 
 # --- 检查是否以 root 运行 ---
@@ -35,37 +28,48 @@ if ! command -v go &> /dev/null; then
 fi
 echo "检测到 Go 已安装: $(go version)"
 
-# --- 2. 设置 Go 代理 ---
+# --- 2. 设置 Go 代理 (修复点) ---
 read -p "是否需要设置 Go 代理 (https://xget.anyul.cn/golang)？(y/N) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "正在设置 GOPROXY..."
+    # 1. 设置下载代理
     export GOPROXY=https://xget.anyul.cn/golang,direct
+    # 2. 【关键修复】关闭 SUMDB 校验，避免连接 sum.golang.org 超时
     export GOSUMDB=off
+    
     echo "GOPROXY 已设置为: $GOPROXY"
-    echo "GOSUMDB 已设置为: off
+    echo "GOSUMDB 已设置为: off (跳过校验以避免连接谷歌超时)"
 else
     echo "跳过代理设置。"
 fi
 
 # --- 3. 安装 Derper ---
 echo "正在安装 Derper (tailscale.com/cmd/derper@latest)..."
-if go install tailscale.com/cmd/derper@latest; then
-    echo "Derper 安装成功！"
+# 增加 -v 参数可以看到详细安装过程
+if go install -v tailscale.com/cmd/derper@latest; then
+    echo "✅ Derper 安装成功！"
 else
-    echo "Derper 安装失败，请检查网络或 Go 环境。"
+    echo "❌ Derper 安装失败。"
+    echo "建议尝试手动执行以下命令排查："
+    echo "export GOPROXY=https://goproxy.cn,direct"
+    echo "go install tailscale.com/cmd/derper@latest"
     exit 1
 fi
 
-# 确定安装路径 (默认为 /root/go/bin/derper，符合你的 Service 模板)
+# 确定安装路径
 DERPER_BIN="/root/go/bin/derper"
 if [ ! -f "$DERPER_BIN" ]; then
-    # 尝试查找实际路径
     GOPATH=$(go env GOPATH)
     if [ -f "$GOPATH/bin/derper" ]; then
         DERPER_BIN="$GOPATH/bin/derper"
     else
-        echo "警告：无法在默认路径找到 derper 二进制文件，Systemd 配置可能需要手动调整。"
+        # 尝试通过 which 寻找
+        DERPER_BIN=$(which derper)
+        if [ -z "$DERPER_BIN" ]; then
+             echo "警告：无法在默认路径找到 derper 二进制文件，Systemd 配置可能需要手动调整。"
+             DERPER_BIN="/root/go/bin/derper" # 回退到默认
+        fi
     fi
 fi
 echo "Derper 二进制路径: $DERPER_BIN"
@@ -110,7 +114,6 @@ Description=Tailscale derp service
 After=network.target
 
 [Service]
-# 注意：如果你不是 root 用户，ExecStart 的路径可能需要修改
 ExecStart=${DERPER_BIN} \\
     -c derper \\
     -a ${ADDR} -http-port -1 \\

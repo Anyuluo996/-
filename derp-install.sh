@@ -1,112 +1,152 @@
 #!/bin/bash
 
 # ==============================================================================
-# Derper 自动安装与配置脚本 (修复代理校验问题版)
+# Derper 自动安装脚本 (支持 PEM 格式证书版)
 # ==============================================================================
 
-# --- 检查是否以 root 运行 ---
+# --- 检查 Root 权限 ---
 if [[ $EUID -ne 0 ]]; then
-   echo "错误：此脚本需要 root 权限执行以配置 systemd 服务。"
-   echo "请使用 sudo 运行此脚本。"
+   echo "错误：此脚本需要 root 权限执行。"
    exit 1
 fi
 
 echo "--- 开始 Derper 安装流程 ---"
 
-# --- 1. 检查 Go 环境 ---
-echo "正在检查 Go 环境..."
-if ! command -v go &> /dev/null; then
+# ------------------------------------------------------------------------------
+# 1. 环境与版本检查
+# ------------------------------------------------------------------------------
+echo "Step 1: 检查 Go 环境..."
+
+install_go_prompt() {
     echo "========================================================"
-    echo "错误：未检测到 Go 环境。"
-    echo "请执行以下命令进行安装："
+    echo "错误：Go 环境缺失或版本过低。"
+    echo "请执行以下命令安装最新版 Go："
     echo ""
     echo "bash <(curl -sL https://xget.anyul.cn/gh/Anyuluo996/-/raw/refs/heads/main/go-install.sh)"
     echo ""
     echo "安装完成后，请重新运行此脚本。"
     echo "========================================================"
     exit 1
-fi
-echo "检测到 Go 已安装: $(go version)"
+}
 
-# --- 2. 设置 Go 代理 (修复点) ---
+if ! command -v go &> /dev/null; then
+    install_go_prompt
+fi
+
+# ------------------------------------------------------------------------------
+# 2. 代理设置
+# ------------------------------------------------------------------------------
 read -p "是否需要设置 Go 代理 (https://xget.anyul.cn/golang)？(y/N) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo "正在设置 GOPROXY..."
-    # 1. 设置下载代理
     export GOPROXY=https://xget.anyul.cn/golang,direct
-    # 2. 【关键修复】关闭 SUMDB 校验，避免连接 sum.golang.org 超时
     export GOSUMDB=off
-    
-    echo "GOPROXY 已设置为: $GOPROXY"
-    echo "GOSUMDB 已设置为: off (跳过校验以避免连接谷歌超时)"
-else
-    echo "跳过代理设置。"
+    echo "代理已设置 (GOSUMDB=off)"
 fi
 
-# --- 3. 安装 Derper ---
-echo "正在安装 Derper (tailscale.com/cmd/derper@latest)..."
-# 增加 -v 参数可以看到详细安装过程
-if go install -v tailscale.com/cmd/derper@latest; then
-    echo "✅ Derper 安装成功！"
-else
-    echo "❌ Derper 安装失败。"
-    echo "建议尝试手动执行以下命令排查："
-    echo "export GOPROXY=https://goproxy.cn,direct"
-    echo "go install tailscale.com/cmd/derper@latest"
-    exit 1
-fi
+# ------------------------------------------------------------------------------
+# 3. 安装 Derper (带版本错误捕获)
+# ------------------------------------------------------------------------------
+echo "Step 2: 正在安装 Derper..."
 
-# 确定安装路径
-DERPER_BIN="/root/go/bin/derper"
-if [ ! -f "$DERPER_BIN" ]; then
-    GOPATH=$(go env GOPATH)
-    if [ -f "$GOPATH/bin/derper" ]; then
-        DERPER_BIN="$GOPATH/bin/derper"
-    else
-        # 尝试通过 which 寻找
-        DERPER_BIN=$(which derper)
-        if [ -z "$DERPER_BIN" ]; then
-             echo "警告：无法在默认路径找到 derper 二进制文件，Systemd 配置可能需要手动调整。"
-             DERPER_BIN="/root/go/bin/derper" # 回退到默认
-        fi
+# 捕获错误输出
+INSTALL_OUTPUT=$(go install -v tailscale.com/cmd/derper@latest 2>&1 | tee /dev/tty)
+INSTALL_EXIT_CODE=${PIPESTATUS[0]}
+
+if [ $INSTALL_EXIT_CODE -ne 0 ]; then
+    echo "❌ 安装失败。"
+    if echo "$INSTALL_OUTPUT" | grep -q -E "invalid go version|must match format"; then
+        echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        echo "【关键错误】：当前 Go 版本过低，无法编译最新版 Derper。"
+        echo "请务必先升级 Go 环境！"
+        echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        install_go_prompt
     fi
+    exit 1
+else
+    echo "✅ Derper 安装成功！"
 fi
-echo "Derper 二进制路径: $DERPER_BIN"
 
-# --- 4. 获取用户配置输入 ---
-echo "--- 配置 Derper 服务参数 ---"
+# 查找二进制文件路径
+DERPER_BIN=$(which derper)
+if [ -z "$DERPER_BIN" ]; then
+    GOPATH=$(go env GOPATH)
+    DERPER_BIN="$GOPATH/bin/derper"
+    [ ! -f "$DERPER_BIN" ] && DERPER_BIN="/root/go/bin/derper"
+fi
 
-# 默认值
+# ------------------------------------------------------------------------------
+# 4. 配置参数收集
+# ------------------------------------------------------------------------------
+echo "Step 3: 配置服务参数"
+
 DEFAULT_ADDR=":8888"
 DEFAULT_STUN="8889"
-DEFAULT_DIR="/root/cerdit"
+DEFAULT_CERT_DIR="/root/cerdit"
 
-read -p "请输入监听端口 (默认为 :8888): " INPUT_ADDR
+read -p "请输入监听端口 [默认 :8888]: " INPUT_ADDR
 ADDR=${INPUT_ADDR:-$DEFAULT_ADDR}
 
-read -p "请输入 STUN 端口 (默认为 8889): " INPUT_STUN
+read -p "请输入 STUN 端口 [默认 8889]: " INPUT_STUN
 STUN=${INPUT_STUN:-$DEFAULT_STUN}
 
-read -p "请输入 Hostname/IP (例如 223.109.49.110): " HOSTNAME
-if [ -z "$HOSTNAME" ]; then
-    echo "错误：Hostname 不能为空！"
-    exit 1
+while [[ -z "$HOSTNAME" ]]; do
+    read -p "请输入 Hostname (例如 derp.mysite.com): " HOSTNAME
+done
+
+# ------------------------------------------------------------------------------
+# 5. 证书与密钥处理逻辑 (已更新提示支持 PEM)
+# ------------------------------------------------------------------------------
+echo "Step 4: 证书配置"
+read -p "是否要提供现有的 SSL 证书和密钥？(y/N) " -n 1 -r
+echo
+
+CERT_MODE="letsencrypt"
+CERT_DIR_FINAL=$DEFAULT_CERT_DIR
+
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    # --- 用户选择提供证书 ---
+    CERT_MODE="manual"
+    
+    read -p "请输入证书安装目录 [默认 $DEFAULT_CERT_DIR]: " INPUT_DIR
+    CERT_DIR_FINAL=${INPUT_DIR:-$DEFAULT_CERT_DIR}
+    
+    # 这里的提示语已更新，明确支持 .pem
+    echo "注意：源文件后缀即使是 .pem 也可以，脚本会自动重命名为 derper 需要的格式。"
+    read -p "请输入证书文件路径 (.crt / .pem): " SRC_CRT
+    read -p "请输入密钥文件路径 (.key / .pem): " SRC_KEY
+    
+    if [[ ! -f "$SRC_CRT" ]] || [[ ! -f "$SRC_KEY" ]]; then
+        echo "错误：找不到指定的证书或密钥文件，请检查路径。"
+        exit 1
+    fi
+    
+    echo "正在创建目录: $CERT_DIR_FINAL"
+    mkdir -p "$CERT_DIR_FINAL"
+    
+    # 强制重命名为 hostname.crt 和 hostname.key (Derper 硬性要求)
+    DEST_CRT="$CERT_DIR_FINAL/$HOSTNAME.crt"
+    DEST_KEY="$CERT_DIR_FINAL/$HOSTNAME.key"
+    
+    echo "正在处理证书文件..."
+    cp "$SRC_CRT" "$DEST_CRT"
+    cp "$SRC_KEY" "$DEST_KEY"
+    
+    echo "✅ 证书已就绪 (已重命名以适配 Derper):"
+    echo "  $DEST_CRT"
+    echo "  $DEST_KEY"
+
+else
+    # --- 用户不提供证书 ---
+    echo "未选择自定义证书，将使用 Let's Encrypt 模式。"
+    echo "证书目录路径将设置为: $CERT_DIR_FINAL"
 fi
 
-read -p "请输入证书存放目录 (默认为 /root/cerdit): " INPUT_CERT
-CERT_DIR=${INPUT_CERT:-$DEFAULT_DIR}
-
-# 确保证书目录存在
-if [ ! -d "$CERT_DIR" ]; then
-    echo "目录 $CERT_DIR 不存在，正在创建..."
-    mkdir -p "$CERT_DIR"
-fi
-
-# --- 5. 生成 Systemd 服务文件 ---
+# ------------------------------------------------------------------------------
+# 6. 生成 Systemd 服务
+# ------------------------------------------------------------------------------
 SERVICE_FILE="/etc/systemd/system/derper.service"
-
-echo "正在生成服务文件: $SERVICE_FILE ..."
+echo "Step 5: 生成 Systemd 服务文件 -> $SERVICE_FILE"
 
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -119,8 +159,8 @@ ExecStart=${DERPER_BIN} \\
     -a ${ADDR} -http-port -1 \\
     -stun-port ${STUN} \\
     -hostname ${HOSTNAME} \\
-    --certmode manual \\
-    -certdir ${CERT_DIR} \\
+    --certmode ${CERT_MODE} \\
+    -certdir ${CERT_DIR_FINAL} \\
     --verify-clients
 Restart=always
 
@@ -128,16 +168,16 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-# 重载 systemd 配置
 systemctl daemon-reload
 
 echo "========================================================"
-echo "✅ Derper 安装与配置完成！"
-echo "服务名称: derper.service"
-echo "配置文件: $SERVICE_FILE"
-echo ""
-echo "请执行以下命令启动并设置开机自启："
-echo ""
-echo "systemctl start derper.service"
-echo "systemctl enable derper.service"
+echo "✅ 安装配置完成！"
+echo "--------------------------------------------------------"
+echo "  Systemd Service: derper.service"
+echo "  证书模式: $CERT_MODE"
+echo "  主机名:   $HOSTNAME"
+echo "--------------------------------------------------------"
+echo "启动命令："
+echo "  systemctl start derper.service"
+echo "  systemctl enable derper.service"
 echo "========================================================"

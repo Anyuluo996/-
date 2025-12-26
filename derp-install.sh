@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Derper 自动安装脚本 (支持 PEM 格式证书版)
+# Derper 自动安装脚本 (支持 PEM 格式证书版) - 修复版
 # ==============================================================================
 
 # --- 检查 Root 权限 ---
@@ -90,8 +90,10 @@ ADDR=${INPUT_ADDR:-$DEFAULT_ADDR}
 read -p "请输入 STUN 端口 [默认 8889]: " INPUT_STUN
 STUN=${INPUT_STUN:-$DEFAULT_STUN}
 
-while [[ -z "$HOSTNAME" ]]; do
-    read -p "请输入 Hostname (例如 derp.mysite.com): " HOSTNAME
+# 【修复点1】将变量名 HOSTNAME 改为 DERP_HOST，避免与系统变量冲突
+DERP_HOST=""
+while [[ -z "$DERP_HOST" ]]; do
+    read -p "请输入 Hostname (例如 derp.mysite.com): " DERP_HOST
 done
 
 # ------------------------------------------------------------------------------
@@ -124,9 +126,9 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo "正在创建目录: $CERT_DIR_FINAL"
     mkdir -p "$CERT_DIR_FINAL"
     
-    # 强制重命名为 hostname.crt 和 hostname.key (Derper 硬性要求)
-    DEST_CRT="$CERT_DIR_FINAL/$HOSTNAME.crt"
-    DEST_KEY="$CERT_DIR_FINAL/$HOSTNAME.key"
+    # 【修复点2】使用 DERP_HOST 变量进行重命名
+    DEST_CRT="$CERT_DIR_FINAL/$DERP_HOST.crt"
+    DEST_KEY="$CERT_DIR_FINAL/$DERP_HOST.key"
     
     echo "正在处理证书文件..."
     cp "$SRC_CRT" "$DEST_CRT"
@@ -148,6 +150,7 @@ fi
 SERVICE_FILE="/etc/systemd/system/derper.service"
 echo "Step 5: 生成 Systemd 服务文件 -> $SERVICE_FILE"
 
+# 【修复点3】配置文件中使用 DERP_HOST
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Tailscale derp service
@@ -158,7 +161,7 @@ ExecStart=${DERPER_BIN} \\
     -c derper \\
     -a ${ADDR} -http-port -1 \\
     -stun-port ${STUN} \\
-    -hostname ${HOSTNAME} \\
+    -hostname ${DERP_HOST} \\
     --certmode ${CERT_MODE} \\
     -certdir ${CERT_DIR_FINAL} \\
     --verify-clients
@@ -170,14 +173,21 @@ EOF
 
 systemctl daemon-reload
 
+# ------------------------------------------------------------------------------
+# 7. 启动服务
+# ------------------------------------------------------------------------------
+echo "Step 6: 正在启动并开机自启服务..."
+# 【修复点4】添加自动启动命令
+systemctl enable derper.service
+systemctl start derper.service
+
 echo "========================================================"
-echo "✅ 安装配置完成！"
+echo "✅ 安装配置完成！服务已启动。"
 echo "--------------------------------------------------------"
 echo "  Systemd Service: derper.service"
 echo "  证书模式: $CERT_MODE"
-echo "  主机名:   $HOSTNAME"
+echo "  主机名:   $DERP_HOST"
 echo "--------------------------------------------------------"
-echo "启动命令："
-echo "  systemctl start derper.service"
-echo "  systemctl enable derper.service"
+echo "当前服务状态："
+systemctl status derper.service --no-pager | grep "Active:"
 echo "========================================================"

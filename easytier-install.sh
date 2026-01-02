@@ -37,16 +37,13 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
     fi
 fi
 
-# 2. 获取 GitHub 最新版本信息 (同时获取 URL 和 Tag)
+# 2. 获取 GitHub 最新版本信息
 log_info "正在查询 GitHub 最新版本..."
 API_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 API_RESPONSE=$(curl -s "$API_URL")
 
-# 提取下载链接
 DOWNLOAD_URL=$(echo "$API_RESPONSE" | jq -r '.assets[] | select(.name | test("easytier-linux-x86_64-v.*\\.zip$")) | .browser_download_url')
-# 提取最新版本号 (例如 v1.2.0)
 REMOTE_VERSION_TAG=$(echo "$API_RESPONSE" | jq -r '.tag_name')
-# 去除 v 前缀用于比较 (v1.2.0 -> 1.2.0)
 REMOTE_VER_NUM=$(echo "$REMOTE_VERSION_TAG" | sed 's/^v//')
 
 if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
@@ -57,8 +54,6 @@ fi
 NEED_INSTALL=true
 
 if [ -f "${INSTALL_DIR}/easytier-core" ]; then
-    # 获取本地版本，通常输出格式为 "easytier-core 1.2.0" 或 "1.2.0"
-    # 使用 grep -oE 提取数字版本号
     LOCAL_VER_RAW=$(${INSTALL_DIR}/easytier-core -V 2>&1)
     LOCAL_VER_NUM=$(echo "$LOCAL_VER_RAW" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
 
@@ -82,7 +77,6 @@ fi
 log_info "停止服务并准备文件..."
 systemctl stop "$SERVICE_NAME" 2>/dev/null
 
-# !!! 关键步骤：升级时备份 config.yaml !!!
 BACKUP_CONFIG="/tmp/easytier_config_backup.yaml"
 rm -f "$BACKUP_CONFIG"
 
@@ -91,7 +85,6 @@ if [ -f "$CONFIG_PATH" ]; then
     cp "$CONFIG_PATH" "$BACKUP_CONFIG"
 fi
 
-# 清理安装目录
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 
@@ -103,7 +96,6 @@ curl -L -o "$TEMP_ZIP" "$DOWNLOAD_URL"
 log_info "正在解压..."
 unzip -q "$TEMP_ZIP" -d "$INSTALL_DIR"
 
-# 处理解压后的目录结构
 SUBDIR=$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -type d)
 if [ -n "$SUBDIR" ]; then
     mv "$SUBDIR"/* "$INSTALL_DIR"/
@@ -118,7 +110,7 @@ if [ ! -f "${INSTALL_DIR}/easytier-core" ]; then
     log_error "安装失败: 未在解压目录找到 easytier-core 文件。"
 fi
 
-# 6. 配置文件处理 (还原备份 或 进入配置向导)
+# 6. 配置文件处理
 RESTORED_CONFIG=false
 
 if [ -f "$BACKUP_CONFIG" ]; then
@@ -128,7 +120,6 @@ if [ -f "$BACKUP_CONFIG" ]; then
     log_info "配置文件保留成功，跳过配置向导。"
 fi
 
-# 只有在没有还原配置（即全新安装）的情况下，才进入配置向导
 if [ "$RESTORED_CONFIG" == "false" ]; then
     
     echo "========================================================"
@@ -143,7 +134,7 @@ if [ "$RESTORED_CONFIG" == "false" ]; then
     USER_CONFIG_PATH=""
 
     if [ "$config_choice" == "1" ]; then
-        # --- 选项1：导入配置文件 ---
+        # 选项1：导入
         while [ -z "$USER_CONFIG_PATH" ]; do
             read -p "请输入 config.yaml 的绝对路径: " input_path
             input_path=$(echo "$input_path" | tr -d '"' | tr -d "'")
@@ -156,11 +147,10 @@ if [ "$RESTORED_CONFIG" == "false" ]; then
                 echo -e "\033[31m错误：文件不存在，请重新输入。\033[0m"
             fi
         done
-        
         cp "$USER_CONFIG_PATH" "$CONFIG_PATH"
 
     else
-        # --- 选项2：手动配置 ---
+        # 选项2：手动配置
         echo "--------------------------------------------------------"
         read -p "1. 请输入节点 Hostname (默认: $(hostname)): " input_hostname
         easyname=${input_hostname:-$(hostname)}
@@ -192,7 +182,7 @@ if [ "$RESTORED_CONFIG" == "false" ]; then
             done
         fi
 
-        # 生成 Config 内容
+        # 生成配置
         INSTANCE_UUID=$(cat /proc/sys/kernel/random/uuid)
         log_info "生成配置文件..."
 
@@ -230,7 +220,7 @@ EOF
     fi
 fi
 
-# 7. 设置 Systemd 服务 (无论升级还是安装都刷新一遍 Service 文件，以防万一)
+# 7. 设置 Systemd 服务
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
 log_info "刷新 Systemd 服务配置..."
 
@@ -257,24 +247,59 @@ log_info "重载服务配置并启动..."
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
 
-sleep 2
+sleep 3 # 等待服务完全启动以便检测端口
 
 log_info "================ 服务状态检查 ================"
 if systemctl is-active --quiet "$SERVICE_NAME"; then
     echo -e "\033[32mEasyTier 服务运行中 (版本: ${REMOTE_VER_NUM})\033[0m"
     echo "------------------------------------------------"
-    # 尝试获取 IP
+    
+    # 尝试获取 VPN IP
     CURRENT_IP=$(${INSTALL_DIR}/easytier-cli ip 2>/dev/null)
     if [ -n "$CURRENT_IP" ]; then
         echo -e "当前 VPN IP: \033[36m${CURRENT_IP}\033[0m"
     fi
     echo "------------------------------------------------"
-    if [ "$RESTORED_CONFIG" == "true" ]; then
-        echo -e "\033[36m[升级成功] 已保留原有配置文件并升级到最新版。\033[0m"
-    else
-        echo -e "\033[36m[安装成功] 新节点已配置完成。\033[0m"
-        echo "注意防火墙放行端口：TCP/UDP 11010, UDP 11011"
+
+    # --- 自动检测端口逻辑 ---
+    echo -e "\033[33m[注意] 根据运行状态，请确保防火墙/安全组放行以下端口：\033[0m"
+    DETECTED_PORTS=""
+    
+    # 优先尝试使用 ss 命令检测真实监听端口
+    if command -v ss &> /dev/null; then
+        ET_PID=$(systemctl show --property MainPID --value $SERVICE_NAME)
+        if [ -n "$ET_PID" ] && [ "$ET_PID" != "0" ]; then
+             # ss输出格式化：获取协议和端口，去除IP前缀
+             DETECTED_PORTS=$(ss -tulpn | grep ",pid=${ET_PID}," | awk '{print $1, $5}' | sed 's/.*://' | sort -u)
+        fi
     fi
+    
+    if [ -n "$DETECTED_PORTS" ]; then
+        # 输出 ss 检测结果
+        echo "$DETECTED_PORTS" | while read proto port; do
+            [ -z "$proto" ] && continue
+            # 将 tcp/udp 转为大写
+            P_UP=$(echo $proto | tr 'a-z' 'A-Z')
+            echo -e "  - ${P_UP}: ${port}"
+        done
+    else
+        # 降级方案：若 ss 失败，则分析 config.yaml
+        if [ -f "$CONFIG_PATH" ]; then
+            grep -oE '(tcp|udp|wg)://[^"]+' "$CONFIG_PATH" | while read line; do
+                proto=$(echo "$line" | cut -d: -f1)
+                port=$(echo "$line" | awk -F: '{print $NF}')
+                if [ "$proto" == "tcp" ]; then
+                    echo -e "  - TCP: $port (Config)"
+                elif [ "$proto" == "udp" ] || [ "$proto" == "wg" ]; then
+                    echo -e "  - UDP: $port (Config)"
+                fi
+            done
+        else
+            echo "  (无法自动检测，请手动查看配置文件 listeners 部分，默认tcp/udp11010,udp11011)"
+        fi
+    fi
+    echo "------------------------------------------------"
+    echo "脚本执行完毕。"
 else
     echo -e "\033[31m服务启动失败！\033[0m"
     systemctl status "$SERVICE_NAME" --no-pager -l
